@@ -18,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SECURITY.md` — vulnerability disclosure policy and bug bounty information
 - `CONTRIBUTING.md` — contributor guide with setup, standards, and PR process
 - `LICENSE` — MIT license file
-- `.github/workflows/ci.yml` — automated CI: build, test, lint, coverage
 - `.github/ISSUE_TEMPLATE/bug_report.md` — structured bug report template
 - `.github/ISSUE_TEMPLATE/feature_request.md` — structured feature request template
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR checklist template

@@ -341,8 +341,6 @@ forge script script/DeployVesting.s.sol:DeployVesting \
 ```
 core-contracts/
 ├── .github/                                 # GitHub community health files
-│   ├── workflows/
-│   │   └── ci.yml                           # CI: build, test, lint, coverage
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug_report.md                    # Structured bug report template
 │   │   └── feature_request.md              # Feature request template
