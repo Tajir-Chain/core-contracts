@@ -1,0 +1,102 @@
+# =============================================================================
+# Tajir Chain · Core Contracts — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Foundry & Solidity Compiler Artifacts
+# -----------------------------------------------------------------------------
+cache/
+cache_forge/
+cache_hardhat/
+.cache/
+out/
+artifacts/
+typechain/
+typechain-types/
+.gas-snapshot
+
+# -----------------------------------------------------------------------------
+# 2. Environment Variables & Sensitive Secrets (CRITICAL for Public Repos)
+# -----------------------------------------------------------------------------
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+
+# Private keys, keystores, and mnemonic files
+*.key
+*.pem
+*.p12
+*.pk
+*.keystore
+.secret
+.secrets
+secrets/
+keystore/
+mnemonic*
+seed*.txt
+*private_key*
+
+# -----------------------------------------------------------------------------
+# 3. Broadcast Logs & Deployment Artifacts
+# -----------------------------------------------------------------------------
+# Broadcast folder contains transaction receipts and deployer addresses from runs
+broadcast/
+deployments/local/
+deployments/localhost/
+deployments.local.toml
+
+# -----------------------------------------------------------------------------
+# 4. Coverage, Static Analysis & Audit Reports
+# -----------------------------------------------------------------------------
+coverage/
+coverage.json
+lcov.info
+*.lcov
+report/
+slither-report.json
+slither.db
+.slither-cache
+mythril.json
+
+# -----------------------------------------------------------------------------
+# 5. IDE & Editor Artifacts
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# 6. Operating System Files
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# -----------------------------------------------------------------------------
+# 7. Node / Scripting & Logs (Auxiliary Tooling)
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+anvil.log
+*.anvil
+
+# -----------------------------------------------------------------------------
+# 8. Temporary Files & Scratch Space
+# -----------------------------------------------------------------------------
+*.tmp
+*.temp
+scratch/

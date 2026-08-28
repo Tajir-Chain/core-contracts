@@ -1,0 +1,54 @@
+# =============================================================================
+# deployments.toml.example
+# =============================================================================
+# Copy this file to deployments.toml and populate it with real addresses.
+# deployments.toml is read by DeployToken.s.sol and DeployVesting.s.sol via
+# the forge-std Config contract.
+#
+# NEVER commit deployments.toml with real addresses to version control.
+# deployments.toml is listed in .gitignore.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Governance & Admin Keys
+# -----------------------------------------------------------------------------
+
+# The Bootstrap Gnosis Safe — receives the full 650M TJR genesis supply
+bootstrap_safe = "0x0000000000000000000000000000000000000000"
+
+# Upgrade authority — granted UPGRADER_ROLE on TajirToken; typically the TajirTimelock
+upgrader = "0x0000000000000000000000000000000000000000"
+
+# Vesting admin — can call withdrawUnreleased() on TajirVestingWallet instances
+# Typically the Bootstrap Safe multisig
+defaultAdmin = "0x0000000000000000000000000000000000000000"
+
+# Timelock contract address — used as upgrader for TajirVestingWallet instances
+tajir_timelock = "0x0000000000000000000000000000000000000000"
+
+# -----------------------------------------------------------------------------
+# Deployed Contract Addresses (populated after each deployment run)
+# -----------------------------------------------------------------------------
+
+# TajirToken (ERC-20 proxy address — use this address for token interactions)
+tajir_token_proxy = ""
+
+# TajirToken implementation address (logic contract, not for direct use)
+tajir_token_impl = ""
+
+# Vesting wallet proxy addresses (populated by DeployVesting.s.sol)
+# team_vesting_wallet_1 = ""
+# team_vesting_wallet_2 = ""
+# team_vesting_wallet_3 = ""
+# team_vesting_wallet_4 = ""
+# ecosystem_growth_vesting_wallet = ""
+
+# -----------------------------------------------------------------------------
+# Network Metadata
+# -----------------------------------------------------------------------------
+
+# Chain ID of the target network
+# 1       = Ethereum Mainnet
+# 11155111 = Sepolia Testnet
+# 31337   = Local Anvil
+chain_id = 31337
