@@ -30,7 +30,7 @@ Only the latest deployed version of each contract is eligible for bug bounty rew
 
 | Severity                                    | Channel                                                    | Response SLA |
 | :------------------------------------------ | :--------------------------------------------------------- | :----------- |
-| 🔴 **Critical / High** (fund loss risk)     | [Immunefi Bug Bounty](https://immunefi.com/bounty/polygon) | 24 hours     |
+| 🔴 **Critical / High** (fund loss risk)     | `devs@tajirchain.com`                                      | 24 hours     |
 | 🟠 **Medium** (logic / access control flaw) | `devs@tajirchain.com`                                      | 48 hours     |
 | 🟡 **Low / Informational**                  | `devs@tajirchain.com`                                      | 7 days       |
 
