@@ -6,17 +6,18 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import {ERC20PermitUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {ERC20BurnableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
 
 /// @title TajirToken — L1 bridged gas token (upgradeable, UUPS)
 /// @notice Fixed-supply ERC20 used as the Tajir L2 gas token. Locked on L1, native on L2.
 /// @dev v1 mints the full supply once at initialize() to `initialHolder` and has no
-///      mint / burn surface. Governance, participation, and voting live in the L2 TajirToken.
-///      Upgrade authority is `UPGRADER_ROLE` via AccessControlUpgradeable.
+///      mint surface.
 contract TajirToken is
     Initializable,
     ERC20Upgradeable,
     ERC20PermitUpgradeable,
     AccessControlUpgradeable,
+    ERC20BurnableUpgradeable,
     UUPSUpgradeable
 {
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
@@ -57,5 +58,7 @@ contract TajirToken is
 
     function _authorizeUpgrade(
         address /*newImplementation*/
-    ) internal override onlyRole(UPGRADER_ROLE) {}
+    ) internal override onlyRole(UPGRADER_ROLE) {
+        revert("Not Upgradeable Anymore!");
+    }
 }
