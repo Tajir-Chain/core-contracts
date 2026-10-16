@@ -11,12 +11,19 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 /**
  * @title TajirVestingWallet
  * @notice Concrete implementation of OpenZeppelin VestingWalletCliff for TJR token distribution
- * @dev Extends VestingWalletCliff to provide cliff-based vesting functionality with linear unlock
+ * @dev Extends VestingWalletCliff with a discrete, tranche-based unlock. Value does not
+ *      accrue continuously — it steps at each tranche boundary.
  *
  * Features:
  * - Cliff period: No tokens unlock until cliff timestamp is reached
  * - Tranche-based vesting: After cliff, tokens unlock in N equal installments
  * - Minimalist: All schedule calculations (durations, intervals) are defined at deployment
+ * - Single asset: each wallet vests exactly one asset, fixed at initialization. Anything
+ *   else the wallet receives sits outside the schedule permanently — it is neither
+ *   vested to the beneficiary nor withdrawable, and cannot affect the schedule.
+ *
+ * DO NOT SEND ANY OTHER ASSET HERE — it is permanently lost. Deliberate: an
+ * admin exit would move the real allocation on a misconfigured wallet.
  *
  * @author TajirToken Chain Development Team
  */
@@ -31,13 +38,18 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
         address admin;
         uint64 trancheDuration;
         uint64 totalTranches;
-        // As this is a one-and-done contract so that's why single revoke globally
+        // Revocation is terminal and applies to `vestedAsset` only. Every other
+        // asset sits outside the schedule entirely, so the single flag can never
+        // accelerate a schedule it was not meant to touch.
         bool revoked;
         // Distinct upgrade authority — keeping revoke and upgrade under
         // different keys removes the single point of failure where one
         // compromised admin can both rug the unvested portion AND swap in
         // a malicious implementation.
         address upgrader;
+        // The one asset this wallet vests. address(0) means the chain's native
+        // coin (TJR on Tajir chain, ETH on Ethereum). Fixed at initialization.
+        address vestedAsset;
     }
 
     // keccak256(abi.encode(uint256(keccak256("tajir.storage.TajirVestingWallet")) - 1)) & ~bytes32(uint256(0xff))
@@ -55,6 +67,10 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
     error ZeroTotalTranches();
     error InvalidScheduleParams();
     error AlreadyRevoked();
+    error NotVestedAsset();
+    error ScheduleLocksNothing();
+    error NoBalanceMoved();
+    error OwnershipLocked();
 
     /*
      * EVENTS
@@ -68,7 +84,7 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
 
     /// @notice Prevents calling the inherited 3-argument initialize method
     function initialize(address, uint64, uint64) public pure override {
-        revert("TajirVestingWallet: use the 8-argument initialize.");
+        revert("TajirVestingWallet: use the 9-argument initialize.");
     }
 
     /**
@@ -79,10 +95,14 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
      * @param cliffSeconds Duration of the cliff (zero tokens released)
      * @param trancheDuration_ Duration of a single installment in seconds (e.g., 30 days or 60 days)
      * @param totalTranches_ Total number of equal installments to be released
-     * @param admin_ Address of the admin who can withdraw unvested tokens
+     * @param admin_ Address of the admin who can revoke the vesting
      * @param upgrader_ Address allowed to authorize implementation upgrades.
      *                  Pass the same address as admin_ if a single key is desired,
      *                  but a separate timelock/governance key is recommended.
+     * @param vestedAsset_ The single asset this wallet vests. Pass address(0) for
+     *                     the chain's native coin, or the ERC-20 address otherwise.
+     *                     Every other asset the wallet receives is permanently outside
+     *                     the schedule and cannot be withdrawn.
      */
     function initialize(
         address beneficiary,
@@ -92,7 +112,8 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
         uint64 trancheDuration_,
         uint64 totalTranches_,
         address admin_,
-        address upgrader_
+        address upgrader_,
+        address vestedAsset_
     ) external initializer {
         if (admin_ == address(0)) revert ZeroAddress();
         if (upgrader_ == address(0)) revert ZeroAddress();
@@ -104,6 +125,14 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
         ) {
             revert InvalidScheduleParams();
         }
+        // A back-dated start is intentional, but the schedule must still lock
+        // value at this moment or the wallet is fully vested on deployment.
+        if (
+            uint256(startTimestamp) + uint256(durationSeconds) <=
+            block.timestamp
+        ) {
+            revert ScheduleLocksNothing();
+        }
 
         __VestingWallet_init(beneficiary, startTimestamp, durationSeconds);
         __VestingWalletCliff_init(cliffSeconds);
@@ -113,37 +142,64 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
         $.totalTranches = totalTranches_;
         $.admin = admin_;
         $.upgrader = upgrader_;
+        $.vestedAsset = vestedAsset_;
     }
 
     /**
-     * @notice Allows the super_owner to withdraw any amount that hasn't vested yet.
+     * @notice Revokes the vesting and returns the not-yet-vested portion to `to`.
      * @dev Claimable tokens (vested but not released) stay in the contract.
-     * @param token The address of the token to withdraw. Use address(0) for Ether.
-     * @param to The address to withdraw the tokens to.
+     *      `token` must be `vestedAsset`; no other asset may latch the revocation
+     *      flag. Terminal: one call per wallet.
+     * @param token Must equal `vestedAsset`. address(0) when the vested asset is native.
+     * @param to The address to return the unvested portion to.
      */
     function withdrawUnreleased(address token, address payable to) external {
         TajirVestingWalletStorage storage $ = _getTajirVestingWalletStorage();
-        if ($.revoked) revert AlreadyRevoked();
         if (msg.sender != $.admin) revert NotAdmin();
+        if ($.revoked) revert AlreadyRevoked();
         if (to == address(0)) revert ZeroAddress();
+        if (token != $.vestedAsset) revert NotVestedAsset();
 
         bool native = token == address(0);
 
-        uint256 currentBalance = native
+        uint256 balanceBefore = native
             ? address(this).balance
             : IERC20(token).balanceOf(address(this));
         uint256 claimable = native ? releasable() : releasable(token);
 
-        if (currentBalance <= claimable) revert NothingToWithdraw();
+        if (balanceBefore <= claimable) revert NothingToWithdraw();
 
-        uint256 withdrawable = currentBalance - claimable;
+        uint256 withdrawable = balanceBefore - claimable;
 
         $.revoked = true;
 
-        emit VestingRevoked(token, withdrawable);
-
         if (native) Address.sendValue(to, withdrawable);
         else SafeERC20.safeTransfer(IERC20(token), to, withdrawable);
+
+        uint256 balanceAfter = native
+            ? address(this).balance
+            : IERC20(token).balanceOf(address(this));
+        if (balanceAfter >= balanceBefore) revert NoBalanceMoved();
+
+        // Report what actually left, not what was intended. A non-conserving
+        // asset can move less than `withdrawable`; latching the flag on an
+        // unverified number is what let a no-op transfer revoke for free.
+        emit VestingRevoked(token, balanceBefore - balanceAfter);
+    }
+
+    /**
+     * @notice Ownership of a vesting wallet is fixed at initialization.
+     * @dev owner() is the beneficiary and every release() pays it. Renouncing would
+     *      burn the allocation to address(0); transferring would sell the live
+     *      position in one unrestricted call. Neither has a legitimate use here.
+     */
+    function renounceOwnership() public pure override {
+        revert OwnershipLocked();
+    }
+
+    /// @dev See {renounceOwnership}.
+    function transferOwnership(address) public pure override {
+        revert OwnershipLocked();
     }
 
     /**
@@ -175,8 +231,57 @@ contract TajirVestingWallet is UUPSUpgradeable, VestingWalletCliffUpgradeable {
     }
 
     /**
+     * @notice Returns the single asset this wallet vests (address(0) = native).
+     */
+    function vestedAsset() external view returns (address) {
+        return _getTajirVestingWalletStorage().vestedAsset;
+    }
+
+    /**
+     * @notice Native amount vested at `timestamp`.
+     * @dev Returns `released()` when the vested asset is an ERC-20, so native
+     *      holdings are outside the schedule entirely and `releasable()` is zero.
+     *      Clamped to `released()` so a shrinking balance degrades gracefully
+     *      instead of underflowing in the inherited `releasable()`.
+     */
+    function vestedAmount(
+        uint64 timestamp
+    ) public view virtual override returns (uint256) {
+        uint256 alreadyReleased = released();
+        if (_getTajirVestingWalletStorage().vestedAsset != address(0)) {
+            return alreadyReleased;
+        }
+        uint256 vested = super.vestedAmount(timestamp);
+        return vested < alreadyReleased ? alreadyReleased : vested;
+    }
+
+    /**
+     * @notice ERC-20 amount vested at `timestamp`.
+     * @dev Returns `released(token)` for every asset other than `vestedAsset`, so
+     *      revoking or holding another token can never move this schedule. address(0)
+     *      is rejected here even when it IS the vested asset — the native coin belongs
+     *      to the overload above, and reaching `super` with it would call `balanceOf`
+     *      on the zero address. Clamped for the same reason as the native overload.
+     */
+    function vestedAmount(
+        address token,
+        uint64 timestamp
+    ) public view virtual override returns (uint256) {
+        uint256 alreadyReleased = released(token);
+        TajirVestingWalletStorage storage $ = _getTajirVestingWalletStorage();
+        if (token == address(0) || token != $.vestedAsset) {
+            return alreadyReleased;
+        }
+        uint256 vested = super.vestedAmount(token, timestamp);
+        return vested < alreadyReleased ? alreadyReleased : vested;
+    }
+
+    /**
      * @dev Implements tranche-based schedule.
      * Calculates the number of full tranches passed since the cliff.
+     * Only ever reached for `vestedAsset` — the `vestedAmount` overrides above
+     * short-circuit every other asset — so the terminal `revoked` branch cannot
+     * accelerate a schedule other than this wallet's own.
      */
     function _vestingSchedule(
         uint256 totalAllocation,
