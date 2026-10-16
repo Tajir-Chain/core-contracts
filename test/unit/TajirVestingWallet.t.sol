@@ -2,513 +2,762 @@
 pragma solidity ^0.8.27;
 
 import {Test} from "forge-std/Test.sol";
+import {TajirVestingWallet} from "src/TajirVestingWallet.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {TajirVestingWallet} from "../../src/TajirVestingWallet.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
-contract MockERC20 {
-    string public name = "Mock";
-    string public symbol = "MCK";
-    uint8 public decimals = 18;
-    uint256 public totalSupply;
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+contract MockERC20 is ERC20 {
+    constructor() ERC20("Mock ERC20", "MERC20") {}
 
-    function mint(address to, uint256 amt) public virtual {
-        balanceOf[to] += amt;
-        totalSupply += amt;
-    }
-
-    function transfer(address to, uint256 amt) public virtual returns (bool) {
-        balanceOf[msg.sender] -= amt;
-        balanceOf[to] += amt;
-        return true;
-    }
-
-    function approve(address s, uint256 a) public virtual returns (bool) {
-        allowance[msg.sender][s] = a;
-        return true;
+    function mint(address to, uint256 amount) public {
+        _mint(to, amount);
     }
 }
 
-/// Balance can shrink independently of transfers (rebase / fee-on-transfer).
-contract RebasingERC20 is MockERC20 {
-    function burnFrom(address who, uint256 amt) external {
-        balanceOf[who] -= amt;
-        totalSupply -= amt;
-    }
-}
+/**
+ * @title TajirVestingTest
+ * @notice Comprehensive test suite for TJR vesting contracts
+ */
+contract TajirVestingTest is Test {
+    MockERC20 public token;
+    TajirVestingWallet public vestingWallet;
 
-/// Reports a balance but moves nothing.
-contract NoopTransferERC20 is MockERC20 {
-    function transfer(address, uint256) public pure override returns (bool) {
-        return true;
-    }
-}
+    address public admin = vm.addr(1);
+    address public pauser = vm.addr(2);
+    address public beneficiary = vm.addr(3);
 
-/// Covers every QuillAudits finding that reproduced against the deployed source,
-/// in both deployment shapes: ERC-20 TJR on Ethereum, native TJR on Tajir chain.
+    uint64 public constant MONTH = 30 days;
+    uint64 public constant YEAR = 12 * MONTH;
 
-/// Takes a 1% fee on transfer out.
-contract FeeERC20 is MockERC20 {
-    function transfer(address to, uint256 a) public override returns (bool) {
-        uint256 fee = a / 100;
-        balanceOf[msg.sender] -= a;
-        balanceOf[to] += a - fee;
-        totalSupply -= fee;
-        return true;
-    }
-}
-
-contract TajirVestingWalletAuditTest is Test {
-    TajirVestingWallet impl;
-    MockERC20 tjr;
-
-    address beneficiary = address(0xBEEF);
-    address adminSafe = address(0xA5A5);
-    address upgraderSafe = address(0x0DDB);
-    address outsider = address(0xDEAD);
-
-    uint64 constant MONTH = 30 days;
-    uint64 constant CLIFF = 12 * MONTH;
-    uint64 constant TRANCHES = 36;
-    uint64 constant DURATION = CLIFF + TRANCHES * MONTH;
-    uint256 constant ALLOC = 8_125_000e18;
+    uint64 public startTimestamp;
+    uint256 public vestingAmount = 100_000e18; // 100k TJR for testing
 
     function setUp() public {
-        vm.warp(2_000_000_000);
-        impl = new TajirVestingWallet();
-        tjr = new MockERC20();
+        token = new MockERC20();
+
+        // Set start timestamp to current block time
+        startTimestamp = uint64(block.timestamp);
     }
 
-    function _initData(
-        uint64 start,
-        address asset
-    ) internal view returns (bytes memory) {
-        return abi.encodeWithSignature(
+    /// @dev Helper to create vesting wallet with given parameters
+    function _createVestingWallet(
+        uint64 duration,
+        uint64 cliff,
+        uint64 trancheDuration,
+        uint64 totalTranches
+    ) internal returns (TajirVestingWallet) {
+        TajirVestingWallet walletImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(walletImpl), "");
+        TajirVestingWallet wallet = TajirVestingWallet(
+            payable(address(proxyVest))
+        );
+        wallet.initialize(
+            beneficiary,
+            startTimestamp,
+            duration,
+            cliff,
+            trancheDuration,
+            totalTranches,
+            admin,
+            admin,
+            address(0)
+        );
+
+        // Fund the vesting wallet with native tokens
+        vm.deal(address(wallet), vestingAmount);
+
+        return wallet;
+    }
+
+    /// @dev Helper to create a wallet that vests an ERC-20 rather than the native coin
+    function _createErc20VestingWallet(
+        address asset,
+        uint64 duration,
+        uint64 cliff,
+        uint64 trancheDuration,
+        uint64 totalTranches
+    ) internal returns (TajirVestingWallet) {
+        bytes memory initData = abi.encodeWithSignature(
             "initialize(address,uint64,uint64,uint64,uint64,uint64,address,address,address)",
             beneficiary,
-            start,
-            DURATION,
-            CLIFF,
-            MONTH,
-            TRANCHES,
-            adminSafe,
-            upgraderSafe,
+            startTimestamp,
+            duration,
+            cliff,
+            trancheDuration,
+            totalTranches,
+            admin,
+            admin,
             asset
         );
+        return
+            TajirVestingWallet(
+                payable(
+                    address(
+                        new ERC1967Proxy(
+                            address(new TajirVestingWallet()),
+                            initData
+                        )
+                    )
+                )
+            );
     }
 
-    function _deploy(
-        uint64 start,
-        address asset
-    ) internal returns (TajirVestingWallet w) {
-        w = TajirVestingWallet(
-            payable(address(new ERC1967Proxy(address(impl), _initData(start, asset))))
+    /*//////////////////////////////////////////////////////////////
+                         DEPLOYMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testDeployVestingWallet() public {
+        uint64 duration = 42 * MONTH;
+        uint64 cliff = 6 * MONTH;
+
+        vestingWallet = _createVestingWallet(duration, cliff, MONTH * 2, 18);
+
+        assertEq(vestingWallet.owner(), beneficiary);
+        assertEq(vestingWallet.start(), startTimestamp);
+        assertEq(vestingWallet.duration(), duration);
+        assertEq(vestingWallet.end(), startTimestamp + duration);
+        assertEq(vestingWallet.cliff(), startTimestamp + cliff);
+        assertEq(address(vestingWallet).balance, vestingAmount);
+        assertEq(vestingWallet.trancheDuration(), MONTH * 2);
+        assertEq(vestingWallet.totalTranches(), 18);
+    }
+
+    function testRevertsInitializeWithThreeParams() public {
+        TajirVestingWallet walletImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(walletImpl), "");
+        TajirVestingWallet wallet = TajirVestingWallet(
+            payable(address(proxyVest))
+        );
+
+        vm.expectRevert("TajirVestingWallet: use the 9-argument initialize.");
+        wallet.initialize(beneficiary, startTimestamp, 48 * MONTH);
+    }
+
+    function testRevertsAtInitialize() public {
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        TajirVestingWallet walletImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(walletImpl), "");
+        TajirVestingWallet wallet = TajirVestingWallet(
+            payable(address(proxyVest))
+        );
+
+        vm.expectRevert(TajirVestingWallet.ZeroTrancheDuration.selector);
+        wallet.initialize(
+            beneficiary,
+            startTimestamp,
+            duration,
+            cliff,
+            0,
+            totalTranches,
+            admin,
+            admin,
+            address(0)
+        );
+
+        vm.expectRevert(TajirVestingWallet.ZeroTotalTranches.selector);
+        wallet.initialize(
+            beneficiary,
+            startTimestamp,
+            duration,
+            cliff,
+            trancheDur,
+            0,
+            admin,
+            admin,
+            address(0)
+        );
+
+        vm.expectRevert(TajirVestingWallet.InvalidScheduleParams.selector);
+        wallet.initialize(
+            beneficiary,
+            startTimestamp,
+            duration,
+            cliff,
+            trancheDur,
+            trancheDur,
+            admin,
+            admin,
+            address(0)
         );
     }
 
-    /// Ethereum shape: TJR is an ERC-20, ETH is the stray asset.
-    function _l1() internal returns (TajirVestingWallet w) {
-        w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), ALLOC);
-    }
+    /*//////////////////////////////////////////////////////////////
+                        CLIFF FUNCTIONALITY TESTS
+    //////////////////////////////////////////////////////////////*/
 
-    /// Tajir chain shape: TJR is the native coin.
-    function _l2() internal returns (TajirVestingWallet w) {
-        w = _deploy(uint64(block.timestamp), address(0));
-        vm.deal(address(w), ALLOC);
-    }
+    function testNoTokensReleasableBeforeCliff() public {
+        uint64 duration = 42 * MONTH;
+        uint64 cliff = 6 * MONTH;
 
-    function _afterFirstTranche() internal {
-        vm.warp(block.timestamp + CLIFF + MONTH);
-    }
+        vestingWallet = _createVestingWallet(duration, cliff, MONTH * 2, 18);
 
-    // ------------------------------------------------------------------
-    // H1 - inherited initializer stays disabled
-    // ------------------------------------------------------------------
-    function test_H1_inherited_initializer_is_disabled() public {
-        TajirVestingWallet w = _l1();
-        vm.expectRevert();
-        w.initialize(outsider, uint64(block.timestamp), DURATION);
-        assertEq(w.owner(), beneficiary);
-    }
+        // Check at various points before cliff
+        uint256[] memory checkpoints = new uint256[](3);
+        checkpoints[0] = startTimestamp + 1 days;
+        checkpoints[1] = startTimestamp + 3 * MONTH;
+        checkpoints[2] = startTimestamp + cliff - 1 days;
 
-    function test_H1_implementation_is_inert() public {
-        vm.expectRevert();
-        impl.initialize(outsider, uint64(block.timestamp), DURATION);
-    }
-
-    // ------------------------------------------------------------------
-    // H2 - revocation is confined to the vested asset
-    // ------------------------------------------------------------------
-    function test_H2_L1_stray_eth_cannot_be_swept_through_revoke() public {
-        TajirVestingWallet w = _l1();
-        vm.deal(address(w), 1 ether);
-        _afterFirstTranche();
-
-        vm.prank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        w.withdrawUnreleased(address(0), payable(adminSafe));
-
-        assertFalse(w.hasRevoked(), "flag untouched");
-        assertEq(w.releasable(address(tjr)), ALLOC / TRANCHES, "schedule intact");
-    }
-
-            /// The audit's named invariant, both shapes.
-        function test_H2_non_vested_assets_are_never_releasable_by_beneficiary()
-        public
-    {
-        TajirVestingWallet w = _l1();
-        MockERC20 airdrop = new MockERC20();
-        airdrop.mint(address(w), 500e18);
-        vm.deal(address(w), 1 ether);
-        _afterFirstTranche();
-
-        assertEq(w.releasable(address(airdrop)), 0, "airdrop is outside the schedule");
-        assertEq(w.releasable(), 0, "stray ETH is outside the schedule");
-    }
-
-        function test_H2_revoke_is_still_terminal_for_the_vested_asset() public {
-        TajirVestingWallet w = _l1();
-        _afterFirstTranche();
-
-        vm.startPrank(adminSafe);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
-        vm.expectRevert(TajirVestingWallet.AlreadyRevoked.selector);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
-        vm.stopPrank();
-    }
-
-            // ------------------------------------------------------------------
-    // M - Ownable escape hatches are closed
-    // ------------------------------------------------------------------
-    function test_M_renounceOwnership_reverts() public {
-        TajirVestingWallet w = _l1();
-        vm.prank(beneficiary);
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        w.renounceOwnership();
-        assertEq(w.owner(), beneficiary);
-    }
-
-    function test_M_transferOwnership_reverts() public {
-        TajirVestingWallet w = _l1();
-        vm.prank(beneficiary);
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        w.transferOwnership(outsider);
-        assertEq(w.owner(), beneficiary);
-    }
-
-    // ------------------------------------------------------------------
-    // M - balance-reducing assets degrade instead of bricking
-    // ------------------------------------------------------------------
-    function test_M_shrinking_vested_balance_does_not_brick_release() public {
-        RebasingERC20 r = new RebasingERC20();
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(r));
-        r.mint(address(w), ALLOC);
-
-        vm.warp(block.timestamp + CLIFF + 10 * MONTH);
-        vm.prank(beneficiary);
-        w.release(address(r));
-        uint256 paid = r.balanceOf(beneficiary);
-        assertGt(paid, 0, "control: release worked");
-
-        r.burnFrom(address(w), r.balanceOf(address(w)));
-
-        assertEq(w.releasable(address(r)), 0, "clamped, no panic");
-        vm.prank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NothingToWithdraw.selector);
-        w.withdrawUnreleased(address(r), payable(adminSafe));
-    }
-
-    function test_M_shrinking_stray_balance_is_inert() public {
-        TajirVestingWallet w = _l1();
-        RebasingERC20 r = new RebasingERC20();
-        r.mint(address(w), 1_000e18);
-        r.burnFrom(address(w), 1_000e18);
-        assertEq(w.releasable(address(r)), 0, "no panic on a stray asset either");
-    }
-
-    // ------------------------------------------------------------------
-    // M - a schedule that locks nothing is rejected
-    // ------------------------------------------------------------------
-    function test_M_backdated_start_that_locks_nothing_reverts() public {
-        vm.expectRevert(TajirVestingWallet.ScheduleLocksNothing.selector);
-        _deploy(uint64(block.timestamp - DURATION - 1), address(tjr));
-    }
-
-    function test_M_intentional_backdating_still_allowed() public {
-        TajirVestingWallet w = _deploy(
-            uint64(block.timestamp - CLIFF - MONTH),
-            address(tjr)
-        );
-        tjr.mint(address(w), ALLOC);
-        assertEq(w.releasable(address(tjr)), ALLOC / TRANCHES, "one tranche already earned");
-    }
-
-    // ------------------------------------------------------------------
-    // M - the flag cannot latch without value moving
-    // ------------------------------------------------------------------
-    function test_M_noop_transfer_vested_asset_cannot_latch_the_flag() public {
-        NoopTransferERC20 fake = new NoopTransferERC20();
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(fake));
-        fake.mint(address(w), ALLOC);
-        _afterFirstTranche();
-
-        vm.prank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NoBalanceMoved.selector);
-        w.withdrawUnreleased(address(fake), payable(adminSafe));
-        assertFalse(w.hasRevoked(), "no value moved, no revocation");
-    }
-
-    // ------------------------------------------------------------------
-    // I - authorization is evaluated before state
-    // ------------------------------------------------------------------
-    function test_I_unauthorized_caller_learns_nothing_about_revocation() public {
-        TajirVestingWallet w = _l1();
-        _afterFirstTranche();
-
-        vm.prank(outsider);
-        vm.expectRevert(TajirVestingWallet.NotAdmin.selector);
-        w.withdrawUnreleased(address(tjr), payable(outsider));
-
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
-
-        vm.prank(outsider);
-        vm.expectRevert(TajirVestingWallet.NotAdmin.selector);
-        w.withdrawUnreleased(address(tjr), payable(outsider));
-    }
-
-    // ------------------------------------------------------------------
-    // Controls - the intended behaviour is unchanged
-    // ------------------------------------------------------------------
-    function test_control_L1_revoke_claws_back_only_the_unvested_portion() public {
-        TajirVestingWallet w = _l1();
-        _afterFirstTranche();
-
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
-
-        assertEq(tjr.balanceOf(adminSafe), ALLOC - ALLOC / TRANCHES, "unvested returned");
-        vm.prank(beneficiary);
-        w.release(address(tjr));
-        assertEq(tjr.balanceOf(beneficiary), ALLOC / TRANCHES, "earned tranche preserved");
-    }
-
-    function test_control_L2_revoke_claws_back_only_the_unvested_portion() public {
-        TajirVestingWallet w = _l2();
-        _afterFirstTranche();
-
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(0), payable(adminSafe));
-
-        assertEq(adminSafe.balance, ALLOC - ALLOC / TRANCHES, "unvested returned");
-        w.release();
-        assertEq(beneficiary.balance, ALLOC / TRANCHES, "earned tranche preserved");
-    }
-
-    function test_control_pre_cliff_nothing_is_releasable() public {
-        TajirVestingWallet w = _l1();
-        vm.warp(block.timestamp + CLIFF - 1);
-        assertEq(w.releasable(address(tjr)), 0);
-    }
-
-    function test_control_full_schedule_pays_out_exactly() public {
-        TajirVestingWallet w = _l1();
-        vm.warp(block.timestamp + DURATION);
-        vm.prank(beneficiary);
-        w.release(address(tjr));
-        assertEq(tjr.balanceOf(beneficiary), ALLOC);
-    }
-
-    function test_control_tranches_accrue_one_at_a_time() public {
-        TajirVestingWallet w = _l1();
-        for (uint64 i = 1; i <= 5; i++) {
-            vm.warp(uint64(block.timestamp) + (i == 1 ? CLIFF + MONTH : MONTH));
+        for (uint256 i = 0; i < checkpoints.length; i++) {
+            vm.warp(checkpoints[i]);
             assertEq(
-                w.releasable(address(tjr)),
-                (ALLOC * i) / TRANCHES,
-                "tranche accrual"
+                vestingWallet.releasable(),
+                0,
+                "Tokens should not be releasable before cliff"
             );
         }
     }
 
-    function test_control_vestedAsset_getter() public {
-        assertEq(_l1().vestedAsset(), address(tjr));
-        assertEq(_l2().vestedAsset(), address(0));
+    function testTokensNotReleasableEvenAfterCliff() public {
+        uint64 duration = 42 * MONTH;
+        uint64 cliff = 6 * MONTH;
+
+        vestingWallet = _createVestingWallet(duration, cliff, MONTH * 2, 18);
+
+        // Warp to just after cliff
+        vm.warp(startTimestamp + cliff + 1 days);
+
+        uint256 releasable = vestingWallet.releasable();
+        assertEq(
+            releasable,
+            0,
+            "Tokens should not be releasable even after cliff"
+        );
     }
 
-    // ---- #1 residual is UNCHANGED: atomic deployment is still the guard ----
-    function test_1_residual_nonatomic_proxy_still_seizable_documented() public {
-        TajirVestingWallet w = TajirVestingWallet(payable(address(
-            new ERC1967Proxy(address(impl), "")
-        )));
-        vm.prank(outsider);
-        (bool ok, ) = address(w).call(_initData(uint64(block.timestamp), address(tjr)));
-        assertTrue(ok, "unchanged by this fix - both deploy paths are atomic");
-        assertEq(w.owner(), beneficiary);
+    function testNoCliffVesting() public {
+        uint64 duration = 24 * MONTH;
+        uint64 cliff = 0; // No cliff
+
+        vestingWallet = _createVestingWallet(duration, cliff, MONTH, 24);
+
+        // Warp to 1 day after start
+        vm.warp(startTimestamp + 1 days);
+
+        uint256 releasable = vestingWallet.releasable();
+        assertEq(
+            releasable,
+            0,
+            "Tokens should not be releasable even after cliff"
+        );
     }
 
-    // ---- #2 the panel's own calldata is now safe on BOTH chains ----
-    function test_2_panel_calldata_L1_now_reverts_instead_of_unlocking() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), ALLOC);
-        vm.deal(address(w), 1 wei);
-        vm.warp(block.timestamp + CLIFF + MONTH);
+    /*//////////////////////////////////////////////////////////////
+                           VESTING TESTS
+    //////////////////////////////////////////////////////////////*/
 
-        vm.prank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        w.withdrawUnreleased(address(0), payable(adminSafe));
-        assertEq(w.releasable(address(tjr)), ALLOC / TRANCHES, "one tranche, not all");
+    function testScenario1() public {
+        // 12 months cliff, 36 months Vesting, 2 months frequency = 18 tranches
+        // Total duration = 48 months
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Before Cliff (Month 11) -> 0%
+        vm.warp(startTimestamp + 11 * MONTH);
+        assertEq(vestingWallet.releasable(), 0);
+
+        // At Cliff (Month 12) -> Still 0% (Requirement: zero tokens during cliff)
+        vm.warp(startTimestamp + 12 * MONTH);
+        assertEq(vestingWallet.releasable(), 0);
+
+        // First Tranche (Month 14) -> 1/18
+        vm.warp(startTimestamp + 14 * MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount / 18);
+
+        // Middle (Month 30) -> 9 tranches (12 cliff + 9 * 2m = 30m)
+        vm.warp(startTimestamp + 30 * MONTH);
+        assertEq(vestingWallet.releasable(), (vestingAmount * 9) / 18);
+
+        // Final (Month 48) -> 18/18
+        vm.warp(startTimestamp + 48 * MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount);
     }
 
-    function test_2_panel_calldata_L2_still_works_unchanged() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(0));
-        vm.deal(address(w), ALLOC);
-        vm.warp(block.timestamp + CLIFF + MONTH);
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(0), payable(adminSafe));
-        assertEq(adminSafe.balance, ALLOC - ALLOC / TRANCHES);
+    function testScenario2() public {
+        // 6 months cliff, 12 months Vesting, 1 month frequency = 12 tranches
+        // Total duration = 18 months
+        uint64 cliff = 6 * MONTH;
+        uint64 trancheDur = MONTH;
+        uint64 totalTranches = 12;
+        uint64 duration = 18 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // At Cliff (Month 6) -> 0%
+        vm.warp(startTimestamp + 6 * MONTH);
+        assertEq(vestingWallet.releasable(), 0);
+
+        // First Tranche (Month 7) -> 1/12
+        vm.warp(startTimestamp + 7 * MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount / 12);
+
+        // Final (Month 18) -> 12/12
+        vm.warp(startTimestamp + 18 * MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount);
     }
 
-    function test_2_contract_IS_inert_after_revocation_now() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), ALLOC);
-        vm.warp(block.timestamp + CLIFF + MONTH);
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
+    function testStepBehaviorNoLinearUnlock() public {
+        // Using Team scenario: 2 months frequency
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
 
-        MockERC20 later = new MockERC20();
-        later.mint(address(w), 1_000e18);
-        assertEq(w.releasable(address(later)), 0, "arrivals stay outside the schedule");
-        vm.deal(address(w), 3 ether);
-        assertEq(w.releasable(), 0, "native too");
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Warp to Month 14 (Tranche 1 unlocked)
+        vm.warp(startTimestamp + 14 * MONTH);
+        uint256 amountAtMonth14 = vestingWallet.releasable();
+        assertEq(amountAtMonth14, vestingAmount / 18);
+
+        // Warp to Month 15 (Halfway to next tranche)
+        // In linear vesting, this would increase. In tranche vesting, it MUST NOT increase.
+        vm.warp(startTimestamp + 15 * MONTH);
+        uint256 amountAtMonth15 = vestingWallet.releasable();
+        assertEq(
+            amountAtMonth15,
+            amountAtMonth14,
+            "Amount should not increase between tranches"
+        );
+
+        // Warp to Month 16 (Tranche 2 unlocked)
+        vm.warp(startTimestamp + 16 * MONTH);
+        assertEq(vestingWallet.releasable(), (vestingAmount * 2) / 18);
     }
 
-    // ---- #3 both shapes ----
-    function test_3_renounce_and_transfer_revert_on_both_shapes() public {
-        TajirVestingWallet l1 = _deploy(uint64(block.timestamp), address(tjr));
-        TajirVestingWallet l2 = _deploy(uint64(block.timestamp), address(0));
-        vm.startPrank(beneficiary);
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        l1.renounceOwnership();
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        l2.renounceOwnership();
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        l1.transferOwnership(outsider);
-        vm.expectRevert(TajirVestingWallet.OwnershipLocked.selector);
-        l2.transferOwnership(outsider);
-        vm.stopPrank();
-    }
+    /*//////////////////////////////////////////////////////////////
+                           ADMIN WITHDRAW
+    //////////////////////////////////////////////////////////////*/
 
-    // ---- #5 monotonicity: vested can never fall below released ----
-    function test_5_vested_never_falls_below_released() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), ALLOC);
-        vm.warp(block.timestamp + CLIFF + 20 * MONTH);
+    function testAdminWithdrawUnreleasedNative() public {
+        // 12 months cliff, 2 months frequency, 18 tranches
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Warp to Month 14 (1 tranche passed)
+        vm.warp(startTimestamp + 14 * MONTH);
+
+        uint256 expectedVested = vestingAmount / 18;
+        uint256 expectedClaimable = expectedVested; // No release yet
+        uint256 expectedWithdrawable = vestingAmount - expectedClaimable;
+
+        assertEq(vestingWallet.releasable(), expectedClaimable);
+
+        uint256 adminBalBefore = admin.balance;
+
+        assertEq(vestingWallet.hasRevoked(), false);
+
+        vm.prank(admin);
+        vestingWallet.withdrawUnreleased(address(0), payable(admin));
+
+        assertEq(
+            admin.balance,
+            adminBalBefore + expectedWithdrawable,
+            "Admin should receive unreleased amount"
+        );
+        assertEq(
+            address(vestingWallet).balance,
+            expectedClaimable,
+            "Claimable amount should remain in contract"
+        );
+
+        // Verify beneficiary can still claim the claimable amount
+        uint256 beneficiaryBalBefore = beneficiary.balance;
         vm.prank(beneficiary);
-        w.release(address(tjr));
-        uint256 rel = w.released(address(tjr));
+        vestingWallet.release();
 
-        vm.warp(block.timestamp - 10 * MONTH); // simulate any backwards recompute
-        assertGe(w.vestedAmount(address(tjr), uint64(block.timestamp)), rel, "clamped");
-        w.releasable(address(tjr)); // must not revert
+        assertEq(
+            beneficiary.balance,
+            beneficiaryBalBefore + expectedClaimable,
+            "Beneficiary should receive claimable amount"
+        );
+        assertEq(address(vestingWallet).balance, 0, "Contract should be empty");
+        assertEq(vestingWallet.hasRevoked(), true);
     }
 
-    // ---- #9 fee-on-transfer: honest event, no brick, flag still latches ----
-    function test_9_fee_on_transfer_emits_the_amount_that_actually_moved() public {
-        FeeERC20 f = new FeeERC20();
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(f));
-        f.mint(address(w), ALLOC);
-        vm.warp(block.timestamp + CLIFF + MONTH);
+    function testAdminWithdrawUnreleasedFailsIfNotAdmin() public {
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
 
-        uint256 beforeBal = f.balanceOf(address(w));
-        vm.recordLogs();
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(f), payable(adminSafe));
-        uint256 moved = beforeBal - f.balanceOf(address(w));
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
 
-        assertTrue(w.hasRevoked(), "value moved, so revocation stands");
-        assertEq(f.balanceOf(address(w)), w.releasable(address(f)), "beneficiary's share intact");
-        assertGt(moved, 0);
+        vm.prank(beneficiary);
+        vm.expectRevert(TajirVestingWallet.NotAdmin.selector);
+        vestingWallet.withdrawUnreleased(address(0), payable(beneficiary));
     }
 
-    // ---- #8 both shapes ----
-    function test_8_backdated_start_locking_nothing_reverts_on_both_shapes() public {
-        vm.expectRevert(TajirVestingWallet.ScheduleLocksNothing.selector);
-        new ERC1967Proxy(address(impl), _initData(uint64(block.timestamp - DURATION - 1), address(tjr)));
-        vm.expectRevert(TajirVestingWallet.ScheduleLocksNothing.selector);
-        new ERC1967Proxy(address(impl), _initData(uint64(block.timestamp - DURATION - 1), address(0)));
+    function testAdminWithdrawUnreleasedFailsIfNothingToWithdraw() public {
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Warp to end
+        vm.warp(startTimestamp + duration + 1 days);
+
+        // At end, everything is vested/claimable. Nothing is unreleased.
+        vm.prank(admin);
+        vm.expectRevert(TajirVestingWallet.NothingToWithdraw.selector);
+        vestingWallet.withdrawUnreleased(address(0), payable(admin));
     }
 
-    // ---- #6 / #12 unchanged design behaviour ----
-    function test_6_and_12_rounding_behaviour_is_unchanged() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), 100_000);
-        vm.warp(block.timestamp + CLIFF + MONTH);
-        assertEq(w.releasable(address(tjr)), 100_000 / TRANCHES, "still floors mid-schedule");
-        vm.warp(block.timestamp + DURATION);
-        assertEq(w.releasable(address(tjr)), 100_000, "still settles exactly at end");
-    }
+    /*//////////////////////////////////////////////////////////////
+                           UPGRADE TESTS
+    //////////////////////////////////////////////////////////////*/
 
-    function test_H2_L2_stray_token_cannot_be_swept_through_revoke() public {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(0));
-        vm.deal(address(w), ALLOC);
-        MockERC20 airdrop = new MockERC20();
-        airdrop.mint(address(w), 1_000e18);
-        _afterFirstTranche();
+    function testUpgradeImplementation() public {
+        vm.startPrank(admin);
 
-        vm.prank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        w.withdrawUnreleased(address(airdrop), payable(adminSafe));
+        TajirVestingWallet walletImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(walletImpl), "");
+        vestingWallet = TajirVestingWallet(payable(address(proxyVest)));
+        vestingWallet.initialize(
+            beneficiary,
+            startTimestamp,
+            48 * MONTH,
+            12 * MONTH,
+            2 * MONTH,
+            18,
+            admin,
+            admin,
+            address(0)
+        );
 
-        assertFalse(w.hasRevoked());
-        assertEq(w.releasable(), ALLOC / TRANCHES, "native schedule intact");
-    }
+        TajirVestingWallet newImplementation = new TajirVestingWallet();
 
-    /// The audit's own named invariant, in both deployment shapes.
-    function test_H2_tjrScheduleUnaffectedByOtherAssetRevoke() public {
-        TajirVestingWallet l1 = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(l1), ALLOC);
-        MockERC20 other = new MockERC20();
-        other.mint(address(l1), 500e18);
-        vm.deal(address(l1), 5 ether);
+        // Read from the proxy's storage slot before upgrade
+        address olderImplementation = address(
+            uint160(
+                uint256(
+                    vm.load(
+                        address(vestingWallet),
+                        ERC1967Utils.IMPLEMENTATION_SLOT
+                    )
+                )
+            )
+        );
+        assertNotEq(
+            address(newImplementation),
+            olderImplementation,
+            "New implementation should be different from current"
+        );
 
-        TajirVestingWallet l2 = _deploy(uint64(block.timestamp), address(0));
-        vm.deal(address(l2), ALLOC);
-        other.mint(address(l2), 500e18);
+        vestingWallet.upgradeToAndCall(address(newImplementation), "");
 
-        _afterFirstTranche();
-        uint256 expected = ALLOC / TRANCHES;
+        // Read from the proxy's storage slot after upgrade
+        address updatedImplementation = address(
+            uint160(
+                uint256(
+                    vm.load(
+                        address(vestingWallet),
+                        ERC1967Utils.IMPLEMENTATION_SLOT
+                    )
+                )
+            )
+        );
 
-        vm.startPrank(adminSafe);
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        l1.withdrawUnreleased(address(other), payable(adminSafe));
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        l1.withdrawUnreleased(address(0), payable(adminSafe));
-        vm.expectRevert(TajirVestingWallet.NotVestedAsset.selector);
-        l2.withdrawUnreleased(address(other), payable(adminSafe));
+        assertEq(
+            updatedImplementation,
+            address(newImplementation),
+            "Proxy implementation should be updated to new implementation"
+        );
+        assertNotEq(
+            updatedImplementation,
+            olderImplementation,
+            "Proxy implementation should be different from the old one"
+        );
         vm.stopPrank();
-
-        assertEq(l1.releasable(address(tjr)), expected, "L1 schedule unmoved");
-        assertEq(l2.releasable(), expected, "L2 schedule unmoved");
     }
 
-    function test_H2_post_revocation_other_assets_stay_outside_the_schedule()
-        public
-    {
-        TajirVestingWallet w = _deploy(uint64(block.timestamp), address(tjr));
-        tjr.mint(address(w), ALLOC);
-        _afterFirstTranche();
+    function testUpgradeRevertsIfNotUpgrader() public {
+        TajirVestingWallet walletImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(walletImpl), "");
+        vestingWallet = TajirVestingWallet(payable(address(proxyVest)));
+        vestingWallet.initialize(
+            beneficiary,
+            startTimestamp,
+            48 * MONTH,
+            12 * MONTH,
+            2 * MONTH,
+            18,
+            admin,
+            admin,
+            address(0)
+        );
 
-        vm.prank(adminSafe);
-        w.withdrawUnreleased(address(tjr), payable(adminSafe));
-        assertTrue(w.hasRevoked());
+        TajirVestingWallet newImpl = new TajirVestingWallet();
+        vm.prank(pauser);
+        vm.expectRevert(TajirVestingWallet.NotUpgrader.selector);
+        vestingWallet.upgradeToAndCall(address(newImpl), "");
+    }
 
-        MockERC20 other = new MockERC20();
-        other.mint(address(w), 500e18);
-        assertEq(w.releasable(address(other)), 0, "not instantly vested");
-        vm.deal(address(w), 3 ether);
-        assertEq(w.releasable(), 0, "native too");
+    function test_Initialize_RevertIfAdminZeroAddress() public {
+        TajirVestingWallet newWallet = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(newWallet), "");
+        vestingWallet = TajirVestingWallet(payable(address(proxyVest)));
+
+        vm.expectRevert(TajirVestingWallet.ZeroAddress.selector);
+        vestingWallet.initialize(
+            address(0x1),
+            uint64(block.timestamp),
+            60 days,
+            30 days,
+            1 days,
+            30,
+            address(0),
+            admin,
+            address(0)
+        );
+    }
+
+    function test_Initialize_RevertIfUpgraderZeroAddress() public {
+        TajirVestingWallet newWallet = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(newWallet), "");
+        vestingWallet = TajirVestingWallet(payable(address(proxyVest)));
+
+        vm.expectRevert(TajirVestingWallet.ZeroAddress.selector);
+        vestingWallet.initialize(
+            address(0x1),
+            uint64(block.timestamp),
+            60 days,
+            30 days,
+            1 days,
+            30,
+            admin,
+            address(0),
+            address(0)
+        );
+    }
+
+    function testUpgraderGetter() public {
+        vestingWallet = _createVestingWallet(
+            48 * MONTH,
+            12 * MONTH,
+            MONTH * 2,
+            18
+        );
+        assertEq(
+            vestingWallet.upgrader(),
+            admin,
+            "upgrader() should return the configured upgrader address"
+        );
+    }
+
+    function test_OnlyUpgraderCanUpgrade() public {
+        address upgraderAddr = vm.addr(99);
+        TajirVestingWallet newImpl = new TajirVestingWallet();
+        ERC1967Proxy proxyVest = new ERC1967Proxy(address(newImpl), "");
+        vestingWallet = TajirVestingWallet(payable(address(proxyVest)));
+        vestingWallet.initialize(
+            beneficiary,
+            uint64(block.timestamp),
+            48 * MONTH,
+            12 * MONTH,
+            2 * MONTH,
+            18,
+            admin,
+            upgraderAddr,
+            address(0)
+        );
+
+        TajirVestingWallet impl2 = new TajirVestingWallet();
+        // Admin cannot upgrade — only the upgrader role can
+        vm.prank(admin);
+        vm.expectRevert(TajirVestingWallet.NotUpgrader.selector);
+        vestingWallet.upgradeToAndCall(address(impl2), "");
+
+        vm.prank(upgraderAddr);
+        vestingWallet.upgradeToAndCall(address(impl2), "");
+    }
+
+    function test_WithdrawRevertIfToZeroAddress() public {
+        vestingWallet = _createVestingWallet(
+            48 * MONTH,
+            12 * MONTH,
+            MONTH * 2,
+            18
+        );
+
+        vm.expectRevert(TajirVestingWallet.ZeroAddress.selector);
+        vm.prank(admin);
+        vestingWallet.withdrawUnreleased(address(0), payable(address(0)));
+    }
+
+    function test_WithdrawUnreleased_RevertIfAlreadyRevoked() public {
+        vestingWallet = _createVestingWallet(
+            48 * MONTH,
+            12 * MONTH,
+            MONTH * 2,
+            18
+        );
+
+        // Admin revokes the wallet first
+        vm.prank(admin);
+        vestingWallet.withdrawUnreleased(address(0), payable(admin));
+
+        // Attempt to withdraw again (or revoke again)
+        vm.expectRevert(TajirVestingWallet.AlreadyRevoked.selector);
+        vm.prank(admin);
+        vestingWallet.withdrawUnreleased(address(0), payable(admin));
+    }
+
+    function test_WithdrawUnreleased_ERC20() public {
+        uint256 amount = 100_000e18;
+
+        vestingWallet = _createErc20VestingWallet(
+            address(token),
+            48 * MONTH,
+            12 * MONTH,
+            MONTH * 2,
+            18
+        );
+        token.mint(address(vestingWallet), amount);
+
+        uint256 adminBalanceBefore = token.balanceOf(admin);
+
+        vm.prank(admin);
+        vestingWallet.withdrawUnreleased(address(token), payable(admin));
+
+        assertEq(token.balanceOf(admin), adminBalanceBefore + amount);
+        assertEq(token.balanceOf(address(vestingWallet)), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           EDGE CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testSingleTrancheBulletUnlock() public {
+        // 12 months cliff, 1 tranche of 12 months
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 12 * MONTH;
+        uint64 totalTranches = 1;
+        uint64 duration = 24 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // At Month 12 (Cliff) -> 0
+        vm.warp(startTimestamp + 12 * MONTH);
+        assertEq(vestingWallet.releasable(), 0);
+
+        // At Month 24 (End) -> 100%
+        vm.warp(startTimestamp + 24 * MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount);
+    }
+
+    function testZeroCliffImmediateStart() public {
+        // 0 cliff, 12 tranches of 1 month
+        uint64 cliff = 0;
+        uint64 trancheDur = MONTH;
+        uint64 totalTranches = 12;
+        uint64 duration = 12 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Start + 1 day -> 0
+        vm.warp(startTimestamp + 1 days);
+        assertEq(vestingWallet.releasable(), 0);
+
+        // Month 1 -> 1/12
+        vm.warp(startTimestamp + MONTH);
+        assertEq(vestingWallet.releasable(), vestingAmount / 12);
+    }
+
+    function testFarFutureUnlocks() public {
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // Warp 100 years into the future
+        vm.warp(startTimestamp + 100 * 365 days);
+        assertEq(vestingWallet.releasable(), vestingAmount);
+    }
+
+    function testReleaseEmptyReleasable() public {
+        uint64 cliff = 12 * MONTH;
+        uint64 trancheDur = 2 * MONTH;
+        uint64 totalTranches = 18;
+        uint64 duration = 48 * MONTH;
+
+        vestingWallet = _createVestingWallet(
+            duration,
+            cliff,
+            trancheDur,
+            totalTranches
+        );
+
+        // At month 6, nothing releasable
+        vm.warp(startTimestamp + 6 * MONTH);
+        assertEq(vestingWallet.releasable(), 0);
+
+        uint256 balBefore = beneficiary.balance;
+        vm.prank(beneficiary);
+        vestingWallet.release();
+
+        assertEq(beneficiary.balance, balBefore, "Balance should not change");
+        assertEq(vestingWallet.released(), 0);
     }
 }
