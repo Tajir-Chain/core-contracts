@@ -60,13 +60,47 @@ contract TajirVestingTest is Test {
             trancheDuration,
             totalTranches,
             admin,
-            admin
+            admin,
+            address(0)
         );
 
         // Fund the vesting wallet with native tokens
         vm.deal(address(wallet), vestingAmount);
 
         return wallet;
+    }
+
+    /// @dev Helper to create a wallet that vests an ERC-20 rather than the native coin
+    function _createErc20VestingWallet(
+        address asset,
+        uint64 duration,
+        uint64 cliff,
+        uint64 trancheDuration,
+        uint64 totalTranches
+    ) internal returns (TajirVestingWallet) {
+        bytes memory initData = abi.encodeWithSignature(
+            "initialize(address,uint64,uint64,uint64,uint64,uint64,address,address,address)",
+            beneficiary,
+            startTimestamp,
+            duration,
+            cliff,
+            trancheDuration,
+            totalTranches,
+            admin,
+            admin,
+            asset
+        );
+        return
+            TajirVestingWallet(
+                payable(
+                    address(
+                        new ERC1967Proxy(
+                            address(new TajirVestingWallet()),
+                            initData
+                        )
+                    )
+                )
+            );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -96,7 +130,7 @@ contract TajirVestingTest is Test {
             payable(address(proxyVest))
         );
 
-        vm.expectRevert("TajirVestingWallet: use the 8-argument initialize.");
+        vm.expectRevert("TajirVestingWallet: use the 9-argument initialize.");
         wallet.initialize(beneficiary, startTimestamp, 48 * MONTH);
     }
 
@@ -121,7 +155,8 @@ contract TajirVestingTest is Test {
             0,
             totalTranches,
             admin,
-            admin
+            admin,
+            address(0)
         );
 
         vm.expectRevert(TajirVestingWallet.ZeroTotalTranches.selector);
@@ -133,7 +168,8 @@ contract TajirVestingTest is Test {
             trancheDur,
             0,
             admin,
-            admin
+            admin,
+            address(0)
         );
 
         vm.expectRevert(TajirVestingWallet.InvalidScheduleParams.selector);
@@ -145,7 +181,8 @@ contract TajirVestingTest is Test {
             trancheDur,
             trancheDur,
             admin,
-            admin
+            admin,
+            address(0)
         );
     }
 
@@ -428,7 +465,8 @@ contract TajirVestingTest is Test {
             2 * MONTH,
             18,
             admin,
-            admin
+            admin,
+            address(0)
         );
 
         TajirVestingWallet newImplementation = new TajirVestingWallet();
@@ -489,7 +527,8 @@ contract TajirVestingTest is Test {
             2 * MONTH,
             18,
             admin,
-            admin
+            admin,
+            address(0)
         );
 
         TajirVestingWallet newImpl = new TajirVestingWallet();
@@ -512,7 +551,8 @@ contract TajirVestingTest is Test {
             1 days,
             30,
             address(0),
-            admin
+            admin,
+            address(0)
         );
     }
 
@@ -530,6 +570,7 @@ contract TajirVestingTest is Test {
             1 days,
             30,
             admin,
+            address(0),
             address(0)
         );
     }
@@ -561,7 +602,8 @@ contract TajirVestingTest is Test {
             2 * MONTH,
             18,
             admin,
-            upgraderAddr
+            upgraderAddr,
+            address(0)
         );
 
         TajirVestingWallet impl2 = new TajirVestingWallet();
@@ -608,7 +650,8 @@ contract TajirVestingTest is Test {
     function test_WithdrawUnreleased_ERC20() public {
         uint256 amount = 100_000e18;
 
-        vestingWallet = _createVestingWallet(
+        vestingWallet = _createErc20VestingWallet(
+            address(token),
             48 * MONTH,
             12 * MONTH,
             MONTH * 2,
