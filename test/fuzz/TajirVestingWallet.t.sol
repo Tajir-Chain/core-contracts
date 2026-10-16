@@ -31,7 +31,8 @@ contract TajirVestingWalletFuzz is Test {
             tDur,
             tCount,
             admin,
-            admin
+            admin,
+            address(0)
         );
         return v;
     }
